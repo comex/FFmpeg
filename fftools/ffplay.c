@@ -1493,10 +1493,10 @@ struct interp_point {
    {5, 0.9},
    {10, 1},
    {11, 1},
-   {29, 1},
-   {30, 1},
-   {40, 1.5},
-   {60, 3},
+   {19, 1},
+   {20, 1},
+   {30, 1.5},
+   {50, 3},
    {200, 10},
 };
 
@@ -1507,15 +1507,15 @@ static void check_external_clock_speed(VideoState *is) {
    if (1) {
       int nb = is->videoq.nb_packets;
       size_t count = sizeof(points)/sizeof(*points);
-      size_t i1;
-      for (i1 = 0; i1 < count; i1++) {
-         if (nb >= points[i1].nb)
+      size_t i2;
+      for (i2 = 0; i2 < count; i2++) {
+         if (nb < points[i2].nb)
             break;
       }
-      i1 = FFMIN(i1, count - 1);
+      size_t i1 = i2 == 0 ? 0 : (i2 - 1);
       size_t i0 = i1 == 0 ? 0 : (i1 - 1);
-      size_t i2 = FFMIN(i1 + 1, count - 1);
-      size_t i3 = FFMIN(i1 + 2, count - 1);
+      size_t i3 = FFMIN(i2 + 1, count - 1);
+      printf("nb: %d .. %d .. %d\n", points[i1].nb, nb, points[i2].nb);
       double res = cubic_interpolate(
          points[i0].speed, points[i1].speed, points[i2].speed, points[i3].speed,
          (double)(nb - points[i1].nb) / (double)(points[i2].nb - points[i1].nb));
