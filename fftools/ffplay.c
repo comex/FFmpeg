@@ -65,8 +65,6 @@ const int program_birth_year = 2003;
 
 #define MAX_QUEUE_SIZE (15 * 1024 * 1024)
 #define MIN_FRAMES 25
-#define EXTERNAL_CLOCK_MIN_FRAMES 2
-#define EXTERNAL_CLOCK_MAX_FRAMES 10
 
 /* Minimum SDL audio buffer size, in samples. */
 #define SDL_AUDIO_MIN_BUFFER_SIZE 512
@@ -87,11 +85,6 @@ const int program_birth_year = 2003;
 
 /* maximum audio speed change to get correct sync */
 #define SAMPLE_CORRECTION_PERCENT_MAX 10
-
-/* external clock speed adjustment constants for realtime sources based on buffer fullness */
-#define EXTERNAL_CLOCK_SPEED_MIN  0.900
-#define EXTERNAL_CLOCK_SPEED_MAX  1.010
-#define EXTERNAL_CLOCK_SPEED_STEP 0.001
 
 /* we use about AUDIO_DIFF_AVG_NB A-V differences to make the average */
 #define AUDIO_DIFF_AVG_NB   20
@@ -118,6 +111,7 @@ typedef struct MyAVPacketList {
 typedef struct PacketQueue {
     MyAVPacketList *first_pkt, *last_pkt;
     int nb_packets;
+    int64_t max_pts_start, max_pts_end;
     int size;
     int64_t duration;
     int abort_request;
@@ -353,6 +347,12 @@ static char *afilters = NULL;
 #endif
 static int autorotate = 1;
 static int find_stream_info = 1;
+/* external clock speed adjustment constants for realtime sources based on buffer fullness */
+static int ext_clock_min_frames = 2;
+static int ext_clock_max_frames = 10;
+static float ext_clock_speed_min  = 0.900;
+static float ext_clock_speed_max  = 1.010;
+static float ext_clock_speed_step = 0.001;
 
 /* current context */
 static int is_full_screen;
@@ -446,6 +446,15 @@ static int packet_queue_put_private(PacketQueue *q, AVPacket *pkt)
     q->nb_packets++;
     q->size += pkt1->pkt.size + sizeof(*pkt1);
     q->duration += pkt1->pkt.duration;
+    if (pkt->pts != AV_NOPTS_VALUE) {
+        int64_t start = pkt->pts, end = pkt->pts + pkt->duration;
+        if (q->nb_packets != 1) {
+            start = FFMAX(start, q->max_pts_start);
+            end = FFMAX(end, q->max_pts_end);
+        }
+        q->max_pts_start = start;
+        q->max_pts_end = end;
+    }
     /* XXX: should duplicate packet data in DV case */
     SDL_CondSignal(q->cond);
     return 0;
@@ -663,6 +672,11 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                     ret = got_frame ? 0 : (pkt.data ? AVERROR(EAGAIN) : AVERROR_EOF);
                 }
             } else {
+                //printf("sending packet type %d pts %f duration %f\n",
+                //    d->avctx->codec_type,
+                //    pkt.pts * av_q2d(d->avctx->pkt_timebase),
+                //    pkt.duration * av_q2d(d->avctx->pkt_timebase));
+
                 if (avcodec_send_packet(d->avctx, &pkt) == AVERROR(EAGAIN)) {
                     av_log(d->avctx, AV_LOG_ERROR, "Receive_frame and send_packet both returned EAGAIN, which is an API violation.\n");
                     d->packet_pending = 1;
@@ -1397,6 +1411,7 @@ static void set_clock(Clock *c, double pts, int serial)
 
 static void set_clock_speed(Clock *c, double speed)
 {
+    av_log(NULL, AV_LOG_VERBOSE, "set_clock_speed(%p, %f)\n", c, speed);
     set_clock(c, get_clock(c), c->serial);
     c->speed = speed;
 }
@@ -1452,17 +1467,84 @@ static double get_master_clock(VideoState *is)
     return val;
 }
 
+// http://paulbourke.net/miscellaneous/interpolation/
+static double cubic_interpolate(double y0, double y1, double y2, double y3, double mu) {
+   double mu2 = mu*mu;
+   double a0 = y3 - y2 - y0 + y1;
+   double a1 = y0 - y1 - a0;
+   double a2 = y2 - y0;
+   double a3 = y1;
+
+   double ret =
+      a0 * mu * mu2 +
+      a1 * mu2 +
+      a2 * mu +
+      a3;
+   av_log(NULL, AV_LOG_VERBOSE, "cubic_interpolate(%f, %f, %f, %f, mu=%f) => %f\n",
+          y0, y1, y2, y3, mu, ret);
+   return ret;
+}
+
+struct interp_point {
+   int nb;
+   double speed;
+} points[] = {
+   {0, 0.5},
+   {5, 0.9},
+   {10, 1},
+   {11, 1},
+   {29, 1},
+   {30, 1},
+   {40, 1.5},
+   {60, 3},
+   {200, 10},
+};
+
 static void check_external_clock_speed(VideoState *is) {
-   if (is->video_stream >= 0 && is->videoq.nb_packets <= EXTERNAL_CLOCK_MIN_FRAMES ||
-       is->audio_stream >= 0 && is->audioq.nb_packets <= EXTERNAL_CLOCK_MIN_FRAMES) {
-       set_clock_speed(&is->extclk, FFMAX(EXTERNAL_CLOCK_SPEED_MIN, is->extclk.speed - EXTERNAL_CLOCK_SPEED_STEP));
-   } else if ((is->video_stream < 0 || is->videoq.nb_packets > EXTERNAL_CLOCK_MAX_FRAMES) &&
-              (is->audio_stream < 0 || is->audioq.nb_packets > EXTERNAL_CLOCK_MAX_FRAMES)) {
-       set_clock_speed(&is->extclk, FFMIN(EXTERNAL_CLOCK_SPEED_MAX, is->extclk.speed + EXTERNAL_CLOCK_SPEED_STEP));
+   av_log(NULL, AV_LOG_VERBOSE, "video: nb_packets=%u, duration=%lld, max_pts=%lld; audio: nb_packets=%u, duration=%lld, max_pts=%lld\n",
+          is->videoq.nb_packets, is->videoq.duration, is->videoq.max_pts_end,
+          is->audioq.nb_packets, is->audioq.duration, is->audioq.max_pts_end);
+   if (1) {
+      int nb = is->videoq.nb_packets;
+      size_t count = sizeof(points)/sizeof(*points);
+      size_t i1;
+      for (i1 = 0; i1 < count; i1++) {
+         if (nb >= points[i1].nb)
+            break;
+      }
+      i1 = FFMIN(i1, count - 1);
+      size_t i0 = i1 == 0 ? 0 : (i1 - 1);
+      size_t i2 = FFMIN(i1 + 1, count - 1);
+      size_t i3 = FFMIN(i1 + 2, count - 1);
+      double res = cubic_interpolate(
+         points[i0].speed, points[i1].speed, points[i2].speed, points[i3].speed,
+         (double)(nb - points[i1].nb) / (double)(points[i2].nb - points[i1].nb));
+
+      set_clock_speed(&is->extclk, res);
+      return;
+   }
+   if (0 && ext_clock_speed_max >= 100) {
+       int64_t pts = is->videoq.max_pts_start;
+       double dpts = av_q2d(is->video_st->time_base) * pts;
+       av_log(NULL, AV_LOG_VERBOSE, "clock: %f->%f (%f)\n", dpts, is->extclk.pts, is->extclk.pts - dpts);
+       set_clock(&is->extclk, dpts, is->extclk.serial);
+       is->extclk.speed = 1.0;
+       return;
+   }
+   if ((is->video_stream >= 0 && is->videoq.nb_packets > ext_clock_max_frames) || /* <- !!! */
+              0/*(is->audio_stream >= 0 && is->audioq.nb_packets > ext_clock_max_frames)*/) {
+       set_clock_speed(&is->extclk, FFMIN(ext_clock_speed_max, is->extclk.speed + ext_clock_speed_step));
+   } else if ((is->video_stream >= 0 && is->videoq.nb_packets <= ext_clock_min_frames) ||
+       0/*is->audio_stream >= 0 && is->audioq.nb_packets <= ext_clock_min_frames*/) {
+       set_clock_speed(&is->extclk, FFMAX(ext_clock_speed_min, is->extclk.speed - ext_clock_speed_step));
    } else {
        double speed = is->extclk.speed;
-       if (speed != 1.0)
-           set_clock_speed(&is->extclk, speed + EXTERNAL_CLOCK_SPEED_STEP * (1.0 - speed) / fabs(1.0 - speed));
+       if (speed != 1.0) {
+           if (fabs(speed - 1.0) < ext_clock_speed_step)
+               set_clock_speed(&is->extclk, 1.0);
+           else
+               set_clock_speed(&is->extclk, speed + ext_clock_speed_step * (1.0 - speed) / fabs(1.0 - speed));
+       }
    }
 }
 
@@ -2306,7 +2388,7 @@ static int synchronize_audio(VideoState *is, int nb_samples)
                     max_nb_samples = ((nb_samples * (100 + SAMPLE_CORRECTION_PERCENT_MAX) / 100));
                     wanted_nb_samples = av_clip(wanted_nb_samples, min_nb_samples, max_nb_samples);
                 }
-                av_log(NULL, AV_LOG_TRACE, "diff=%f adiff=%f sample_diff=%d apts=%0.3f %f\n",
+                av_log(NULL, AV_LOG_VERBOSE, "diff=%f adiff=%f sample_diff=%d apts=%0.3f %f\n",
                         diff, avg_diff, wanted_nb_samples - nb_samples,
                         is->audio_clock, is->audio_diff_threshold);
             }
@@ -2360,6 +2442,7 @@ static int audio_decode_frame(VideoState *is)
         (af->frame->channel_layout && af->frame->channels == av_get_channel_layout_nb_channels(af->frame->channel_layout)) ?
         af->frame->channel_layout : av_get_default_channel_layout(af->frame->channels);
     wanted_nb_samples = synchronize_audio(is, af->frame->nb_samples);
+    //av_log(NULL, AV_LOG_VERBOSE, "wanted_nb_samples=%d actual=%d\n", wanted_nb_samples, af->frame->nb_samples);
 
     if (af->frame->format        != is->audio_src.fmt            ||
         dec_channel_layout       != is->audio_src.channel_layout ||
@@ -2733,6 +2816,7 @@ static int is_realtime(AVFormatContext *s)
 
     if(s->pb && (   !strncmp(s->url, "rtp:", 4)
                  || !strncmp(s->url, "udp:", 4)
+                 || !strncmp(s->url, "rtmp:", 5)
                 )
     )
         return 1;
@@ -3616,6 +3700,11 @@ static const OptionDef options[] = {
     { "autorotate", OPT_BOOL, { &autorotate }, "automatically rotate video", "" },
     { "find_stream_info", OPT_BOOL | OPT_INPUT | OPT_EXPERT, { &find_stream_info },
         "read and decode the streams to fill missing information with heuristics" },
+    { "ext_clock_min_frames", OPT_INT | HAS_ARG, { &ext_clock_min_frames }, "external clock min frames", "" },
+    { "ext_clock_max_frames", OPT_INT | HAS_ARG, { &ext_clock_max_frames }, "external clock max frames", "" },
+    { "ext_clock_speed_min", OPT_FLOAT | HAS_ARG, { &ext_clock_speed_min }, "external clock speed min", "" },
+    { "ext_clock_speed_max", OPT_FLOAT | HAS_ARG, { &ext_clock_speed_max }, "external clock speed max", "" },
+    { "ext_clock_speed_step", OPT_FLOAT | HAS_ARG, { &ext_clock_speed_step }, "external clock speed step", "" },
     { NULL, },
 };
 
