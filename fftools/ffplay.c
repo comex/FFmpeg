@@ -1362,8 +1362,9 @@ static int video_open(VideoState *is)
         SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
     SDL_ShowWindow(window);
 
-    is->width  = w;
-    is->height = h;
+    //is->width  = w;
+    //is->height = h;
+    SDL_GetRendererOutputSize(renderer, &is->width, &is->height);
 
     return 0;
 }
@@ -3522,8 +3523,11 @@ static void event_loop(VideoState *cur_stream)
         case SDL_WINDOWEVENT:
             switch (event.window.event) {
                 case SDL_WINDOWEVENT_RESIZED:
-                    screen_width  = cur_stream->width  = event.window.data1;
-                    screen_height = cur_stream->height = event.window.data2;
+                    //screen_width  = cur_stream->width  = event.window.data1;
+                    //screen_height = cur_stream->height = event.window.data2;
+                    SDL_GetRendererOutputSize(renderer, &screen_width, &screen_height);
+                    cur_stream->width = screen_width;
+                    cur_stream->height = screen_height;
                     if (cur_stream->vis_texture) {
                         SDL_DestroyTexture(cur_stream->vis_texture);
                         cur_stream->vis_texture = NULL;
@@ -3816,6 +3820,7 @@ int main(int argc, char **argv)
             flags |= SDL_WINDOW_BORDERLESS;
         else
             flags |= SDL_WINDOW_RESIZABLE;
+        flags |= SDL_WINDOW_ALLOW_HIGHDPI;
         window = SDL_CreateWindow(program_name, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, default_width, default_height, flags);
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
         if (window) {
