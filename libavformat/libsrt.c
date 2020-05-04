@@ -90,6 +90,9 @@ typedef struct SRTContext {
     int messageapi;
     SRT_TRANSTYPE transtype;
     int linger;
+    int bstats_ms_snd_buf;
+    int bstats_ms_snd_tsb_pd_delay;
+    int64_t last_bstats_time;
 } SRTContext;
 
 #define D AV_OPT_FLAG_DECODING_PARAM
@@ -140,8 +143,34 @@ static const AVOption libsrt_options[] = {
     { "live",           NULL, 0, AV_OPT_TYPE_CONST,  { .i64 = SRTT_LIVE }, INT_MIN, INT_MAX, .flags = D|E, "transtype" },
     { "file",           NULL, 0, AV_OPT_TYPE_CONST,  { .i64 = SRTT_FILE }, INT_MIN, INT_MAX, .flags = D|E, "transtype" },
     { "linger",         "Number of seconds that the socket waits for unsent data when closing", OFFSET(linger),           AV_OPT_TYPE_INT,      { .i64 = -1 }, -1, INT_MAX,   .flags = D|E },
+    { "bstats-ms-snd-buf",     "asdf",               OFFSET(bstats_ms_snd_buf),       AV_OPT_TYPE_INT,      { .i64 = -1 }, -1, INT_MAX,   .flags = D|E | AV_OPT_FLAG_EXPORT | AV_OPT_FLAG_READONLY },
+    { "bstats-ms-snd-tsb-pd-delay",     "asdf",               OFFSET(bstats_ms_snd_tsb_pd_delay),       AV_OPT_TYPE_INT,      { .i64 = -1 }, -1, INT_MAX,   .flags = D|E | AV_OPT_FLAG_EXPORT | AV_OPT_FLAG_READONLY },
     { NULL }
 };
+
+static void libsrt_invalidate_bstats(SRTContext *s) {
+    s->bstats_ms_snd_buf = -1;
+    s->bstats_ms_snd_tsb_pd_delay = -1;
+    s->last_bstats_time = 0;
+}
+
+static void libsrt_update_bstats(SRTContext *s) {
+    int64_t now;
+    int ret;
+    SRT_TRACEBSTATS bstats;
+
+    now = av_gettime_relative();
+    if (now - s->last_bstats_time > 1000000) {
+        ret = srt_bstats(s->fd, &bstats, 0);
+        if (ret < 0) {
+            libsrt_invalidate_bstats(s);
+            return;
+        }
+        s->last_bstats_time = now;
+        s->bstats_ms_snd_buf = bstats.msSndBuf;
+        s->bstats_ms_snd_tsb_pd_delay = bstats.msSndTsbPdDelay;
+    }
+}
 
 static int libsrt_neterrno(URLContext *h)
 {
@@ -490,6 +519,8 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
     char buf[256];
     int ret = 0;
 
+    libsrt_invalidate_bstats(s);
+
     if (srt_startup() < 0) {
         return AVERROR_UNKNOWN;
     }
@@ -640,6 +671,8 @@ static int libsrt_read(URLContext *h, uint8_t *buf, int size)
         ret = libsrt_neterrno(h);
     }
 
+    libsrt_update_bstats(s);
+
     return ret;
 }
 
@@ -658,6 +691,8 @@ static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
     if (ret < 0) {
         ret = libsrt_neterrno(h);
     }
+
+    libsrt_update_bstats(s);
 
     return ret;
 }
