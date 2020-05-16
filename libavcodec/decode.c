@@ -1886,23 +1886,24 @@ int ff_get_buffer(AVCodecContext *avctx, AVFrame *frame, int flags)
     if (ret < 0)
         goto fail;
 
-    if (hwaccel) {
-        if (hwaccel->alloc_frame) {
-            ret = hwaccel->alloc_frame(avctx, frame);
+    if (hwaccel && hwaccel->alloc_frame) {
+        ret = hwaccel->alloc_frame(avctx, frame);
+        if (ret < 0)
             goto fail;
-        }
-    } else
-        avctx->sw_pix_fmt = avctx->pix_fmt;
+    } else {
+        if (!hwaccel)
+            avctx->sw_pix_fmt = avctx->pix_fmt;
 
-    ret = avctx->get_buffer2(avctx, frame, flags);
-    if (ret < 0)
-        goto fail;
+        ret = avctx->get_buffer2(avctx, frame, flags);
+        if (ret < 0)
+            goto fail;
 
-    validate_avframe_allocation(avctx, frame);
+        validate_avframe_allocation(avctx, frame);
 
-    ret = ff_attach_decode_data(frame);
-    if (ret < 0)
-        goto fail;
+        ret = ff_attach_decode_data(frame);
+        if (ret < 0)
+            goto fail;
+    }
 
     if (avctx->codec_type == AVMEDIA_TYPE_VIDEO && !override_dimensions &&
         !(avctx->codec->caps_internal & FF_CODEC_CAP_EXPORTS_CROPPING)) {
