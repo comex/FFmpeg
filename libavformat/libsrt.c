@@ -90,14 +90,24 @@ typedef struct SRTContext {
     int messageapi;
     SRT_TRANSTYPE transtype;
     int linger;
-    int bstats_ms_snd_buf;
-    int bstats_ms_snd_tsb_pd_delay;
+    SRT_TRACEBSTATS bstats;
     int64_t last_bstats_time;
 } SRTContext;
 
 #define D AV_OPT_FLAG_DECODING_PARAM
 #define E AV_OPT_FLAG_ENCODING_PARAM
 #define OFFSET(x) offsetof(SRTContext, x)
+#define BSTAT(name, ty) { \
+    "bstats-" #name, \
+    #name, \
+    offsetof(SRTContext, bstats) + offsetof(SRT_TRACEBSTATS, name), \
+    ty, \
+    { .i64 = -1 }, \
+    -INFINITY, \
+    INFINITY, \
+    .flags = AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_ENCODING_PARAM | AV_OPT_FLAG_EXPORT | AV_OPT_FLAG_READONLY \
+}
+
 static const AVOption libsrt_options[] = {
     { "timeout",        "Timeout of socket I/O operations (in microseconds)",                   OFFSET(rw_timeout),       AV_OPT_TYPE_INT64, { .i64 = -1 }, -1, INT64_MAX, .flags = D|E },
     { "listen_timeout", "Connection awaiting timeout (in microseconds)" ,                       OFFSET(listen_timeout),   AV_OPT_TYPE_INT64, { .i64 = -1 }, -1, INT64_MAX, .flags = D|E },
@@ -143,14 +153,98 @@ static const AVOption libsrt_options[] = {
     { "live",           NULL, 0, AV_OPT_TYPE_CONST,  { .i64 = SRTT_LIVE }, INT_MIN, INT_MAX, .flags = D|E, "transtype" },
     { "file",           NULL, 0, AV_OPT_TYPE_CONST,  { .i64 = SRTT_FILE }, INT_MIN, INT_MAX, .flags = D|E, "transtype" },
     { "linger",         "Number of seconds that the socket waits for unsent data when closing", OFFSET(linger),           AV_OPT_TYPE_INT,      { .i64 = -1 }, -1, INT_MAX,   .flags = D|E },
-    { "bstats-ms-snd-buf",     "asdf",               OFFSET(bstats_ms_snd_buf),       AV_OPT_TYPE_INT,      { .i64 = -1 }, -1, INT_MAX,   .flags = D|E | AV_OPT_FLAG_EXPORT | AV_OPT_FLAG_READONLY },
-    { "bstats-ms-snd-tsb-pd-delay",     "asdf",               OFFSET(bstats_ms_snd_tsb_pd_delay),       AV_OPT_TYPE_INT,      { .i64 = -1 }, -1, INT_MAX,   .flags = D|E | AV_OPT_FLAG_EXPORT | AV_OPT_FLAG_READONLY },
+
+    BSTAT(msTimeStamp, AV_OPT_TYPE_INT64),
+    BSTAT(pktSentTotal, AV_OPT_TYPE_INT64),
+    BSTAT(pktRecvTotal, AV_OPT_TYPE_INT64),
+    BSTAT(pktSndLossTotal, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvLossTotal, AV_OPT_TYPE_INT),
+    BSTAT(pktRetransTotal, AV_OPT_TYPE_INT),
+    BSTAT(pktSentACKTotal, AV_OPT_TYPE_INT),
+    BSTAT(pktRecvACKTotal, AV_OPT_TYPE_INT),
+    BSTAT(pktSentNAKTotal, AV_OPT_TYPE_INT),
+    BSTAT(pktRecvNAKTotal, AV_OPT_TYPE_INT),
+    BSTAT(usSndDurationTotal, AV_OPT_TYPE_INT64),
+    BSTAT(pktSndDropTotal, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvDropTotal, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvUndecryptTotal, AV_OPT_TYPE_INT),
+    BSTAT(byteSentTotal, AV_OPT_TYPE_UINT64),
+    BSTAT(byteRecvTotal, AV_OPT_TYPE_UINT64),
+#ifdef SRT_ENABLE_LOSTBYTESCOUNT
+    BSTAT(byteRcvLossTotal, AV_OPT_TYPE_UINT64),
+#endif
+    BSTAT(byteRetransTotal, AV_OPT_TYPE_UINT64),
+    BSTAT(byteSndDropTotal, AV_OPT_TYPE_UINT64),
+    BSTAT(byteRcvDropTotal, AV_OPT_TYPE_UINT64),
+    BSTAT(byteRcvUndecryptTotal, AV_OPT_TYPE_UINT64),
+    BSTAT(pktSent, AV_OPT_TYPE_INT64),
+    BSTAT(pktRecv, AV_OPT_TYPE_INT64),
+    BSTAT(pktSndLoss, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvLoss, AV_OPT_TYPE_INT),
+    BSTAT(pktRetrans, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvRetrans, AV_OPT_TYPE_INT),
+    BSTAT(pktSentACK, AV_OPT_TYPE_INT),
+    BSTAT(pktRecvACK, AV_OPT_TYPE_INT),
+    BSTAT(pktSentNAK, AV_OPT_TYPE_INT),
+    BSTAT(pktRecvNAK, AV_OPT_TYPE_INT),
+    BSTAT(mbpsSendRate, AV_OPT_TYPE_DOUBLE),
+    BSTAT(mbpsRecvRate, AV_OPT_TYPE_DOUBLE),
+    BSTAT(usSndDuration, AV_OPT_TYPE_INT64),
+    BSTAT(pktReorderDistance, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvAvgBelatedTime, AV_OPT_TYPE_DOUBLE),
+    BSTAT(pktRcvBelated, AV_OPT_TYPE_INT64),
+    BSTAT(pktSndDrop, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvDrop, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvUndecrypt, AV_OPT_TYPE_INT),
+    BSTAT(byteSent, AV_OPT_TYPE_UINT64),
+    BSTAT(byteRecv, AV_OPT_TYPE_UINT64),
+#ifdef SRT_ENABLE_LOSTBYTESCOUNT
+    BSTAT(byteRcvLoss, AV_OPT_TYPE_UINT64),
+#endif
+    BSTAT(byteRetrans, AV_OPT_TYPE_UINT64),
+    BSTAT(byteSndDrop, AV_OPT_TYPE_UINT64),
+    BSTAT(byteRcvDrop, AV_OPT_TYPE_UINT64),
+    BSTAT(byteRcvUndecrypt, AV_OPT_TYPE_UINT64),
+    BSTAT(usPktSndPeriod, AV_OPT_TYPE_DOUBLE),
+    BSTAT(pktFlowWindow, AV_OPT_TYPE_INT),
+    BSTAT(pktCongestionWindow, AV_OPT_TYPE_INT),
+    BSTAT(pktFlightSize, AV_OPT_TYPE_INT),
+    BSTAT(msRTT, AV_OPT_TYPE_DOUBLE),
+    BSTAT(mbpsBandwidth, AV_OPT_TYPE_DOUBLE),
+    BSTAT(byteAvailSndBuf, AV_OPT_TYPE_INT),
+    BSTAT(byteAvailRcvBuf, AV_OPT_TYPE_INT),
+    BSTAT(mbpsMaxBW, AV_OPT_TYPE_DOUBLE),
+    BSTAT(byteMSS, AV_OPT_TYPE_INT),
+    BSTAT(pktSndBuf, AV_OPT_TYPE_INT),
+    BSTAT(byteSndBuf, AV_OPT_TYPE_INT),
+    BSTAT(msSndBuf, AV_OPT_TYPE_INT),
+    BSTAT(msSndTsbPdDelay, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvBuf, AV_OPT_TYPE_INT),
+    BSTAT(byteRcvBuf, AV_OPT_TYPE_INT),
+    BSTAT(msRcvBuf, AV_OPT_TYPE_INT),
+    BSTAT(msRcvTsbPdDelay, AV_OPT_TYPE_INT),
+    BSTAT(pktSndFilterExtraTotal, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvFilterExtraTotal, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvFilterSupplyTotal, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvFilterLossTotal, AV_OPT_TYPE_INT),
+    BSTAT(pktSndFilterExtra, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvFilterExtra, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvFilterSupply, AV_OPT_TYPE_INT),
+    BSTAT(pktRcvFilterLoss, AV_OPT_TYPE_INT),
+    BSTAT(pktReorderTolerance, AV_OPT_TYPE_INT),
+    BSTAT(pktSentUniqueTotal, AV_OPT_TYPE_INT64),
+    BSTAT(pktRecvUniqueTotal, AV_OPT_TYPE_INT64),
+    BSTAT(byteSentUniqueTotal, AV_OPT_TYPE_UINT64),
+    BSTAT(byteRecvUniqueTotal, AV_OPT_TYPE_UINT64),
+    BSTAT(pktSentUnique, AV_OPT_TYPE_INT64),
+    BSTAT(pktRecvUnique, AV_OPT_TYPE_INT64),
+    BSTAT(byteSentUnique, AV_OPT_TYPE_UINT64),
+    BSTAT(byteRecvUnique, AV_OPT_TYPE_UINT64),
     { NULL }
 };
 
 static void libsrt_invalidate_bstats(SRTContext *s) {
-    s->bstats_ms_snd_buf = -1;
-    s->bstats_ms_snd_tsb_pd_delay = -1;
+    memset(&s->bstats, 0xff, sizeof(s->bstats));
     s->last_bstats_time = 0;
 }
 
@@ -161,14 +255,12 @@ static void libsrt_update_bstats(SRTContext *s) {
 
     now = av_gettime_relative();
     if (now - s->last_bstats_time > 1000000) {
-        ret = srt_bstats(s->fd, &bstats, 0);
+        ret = srt_bstats(s->fd, &s->bstats, 0);
         if (ret < 0) {
             libsrt_invalidate_bstats(s);
             return;
         }
         s->last_bstats_time = now;
-        s->bstats_ms_snd_buf = bstats.msSndBuf;
-        s->bstats_ms_snd_tsb_pd_delay = bstats.msSndTsbPdDelay;
     }
 }
 
