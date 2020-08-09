@@ -62,6 +62,7 @@ static const char *opt_name_hwaccels[]                  = {"hwaccel", NULL};
 static const char *opt_name_hwaccel_devices[]           = {"hwaccel_device", NULL};
 static const char *opt_name_hwaccel_output_formats[]    = {"hwaccel_output_format", NULL};
 static const char *opt_name_autorotate[]                = {"autorotate", NULL};
+static const char *opt_name_autoscale[]                 = {"autoscale", NULL};
 static const char *opt_name_max_frames[]                = {"frames", "aframes", "vframes", "dframes", NULL};
 static const char *opt_name_bitstream_filters[]         = {"bsf", "absf", "vbsf", NULL};
 static const char *opt_name_codec_tags[]                = {"tag", "atag", "vtag", "stag", NULL};
@@ -227,6 +228,7 @@ static void init_options(OptionsContext *o)
     o->limit_filesize = UINT64_MAX;
     o->chapters_input_file = INT_MAX;
     o->accurate_seek  = 1;
+    o->thread_queue_size = -1;
 }
 
 static int show_hwaccels(void *optctx, const char *opt, const char *arg)
@@ -262,8 +264,9 @@ static AVDictionary *strip_specifiers(AVDictionary *dict)
 static int opt_abort_on(void *optctx, const char *opt, const char *arg)
 {
     static const AVOption opts[] = {
-        { "abort_on"        , NULL, 0, AV_OPT_TYPE_FLAGS, { .i64 = 0 }, INT64_MIN, INT64_MAX, .unit = "flags" },
-        { "empty_output"    , NULL, 0, AV_OPT_TYPE_CONST, { .i64 = ABORT_ON_FLAG_EMPTY_OUTPUT     },    .unit = "flags" },
+        { "abort_on"           , NULL, 0, AV_OPT_TYPE_FLAGS, { .i64 = 0 }, INT64_MIN, INT64_MAX,           .unit = "flags" },
+        { "empty_output"       , NULL, 0, AV_OPT_TYPE_CONST, { .i64 = ABORT_ON_FLAG_EMPTY_OUTPUT        }, .unit = "flags" },
+        { "empty_output_stream", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = ABORT_ON_FLAG_EMPTY_OUTPUT_STREAM }, .unit = "flags" },
         { NULL },
     };
     static const AVClass class = {
@@ -1268,7 +1271,7 @@ static int open_input_file(OptionsContext *o, const char *filename)
     f->duration = 0;
     f->time_base = (AVRational){ 1, 1 };
 #if HAVE_THREADS
-    f->thread_queue_size = o->thread_queue_size > 0 ? o->thread_queue_size : 8;
+    f->thread_queue_size = o->thread_queue_size;
 #endif
 
     /* check if all codec options have been used */
@@ -1461,6 +1464,8 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
         ost->encoder_opts  = filter_codec_opts(o->g->codec_opts, ost->enc->id, oc, st, ost->enc);
 
         MATCH_PER_STREAM_OPT(presets, str, preset, oc, st);
+        ost->autoscale = 1;
+        MATCH_PER_STREAM_OPT(autoscale, i, ost->autoscale, oc, st);
         if (preset && (!(ret = get_preset_file_2(preset, ost->enc->name, &s)))) {
             do  {
                 buf = get_line(s);
@@ -3663,6 +3668,9 @@ const OptionDef options[] = {
     { "autorotate",       HAS_ARG | OPT_BOOL | OPT_SPEC |
                           OPT_EXPERT | OPT_INPUT,                                { .off = OFFSET(autorotate) },
         "automatically insert correct rotate filters" },
+    { "autoscale",        HAS_ARG | OPT_BOOL | OPT_SPEC |
+                          OPT_EXPERT | OPT_OUTPUT,                               { .off = OFFSET(autoscale) },
+        "automatically insert a scale filter at the end of the filter graph" },
 
     /* audio options */
     { "aframes",        OPT_AUDIO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_audio_frames },

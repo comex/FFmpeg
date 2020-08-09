@@ -173,18 +173,17 @@ typedef struct VariantStream {
     unsigned int nb_streams;
     int m3u8_created; /* status of media play-list creation */
     int is_default; /* default status of audio group */
-    char *language; /* audio lauguage name */
-    char *agroup; /* audio group name */
-    char *sgroup; /* subtitle group name */
-    char *ccgroup; /* closed caption group name */
-    char *baseurl;
-    char *varname; // variant name
+    const char *language; /* audio lauguage name */
+    const char *agroup;   /* audio group name */
+    const char *sgroup;   /* subtitle group name */
+    const char *ccgroup;  /* closed caption group name */
+    const char *varname;  /* variant name */
 } VariantStream;
 
 typedef struct ClosedCaptionsStream {
-    char *ccgroup; /* closed caption group name */
-    char *instreamid; /* closed captions INSTREAM-ID */
-    char *language; /* closed captions langauge */
+    const char *ccgroup;    /* closed caption group name */
+    const char *instreamid; /* closed captions INSTREAM-ID */
+    const char *language;   /* closed captions langauge */
 } ClosedCaptionsStream;
 
 typedef struct HLSContext {
@@ -366,11 +365,11 @@ fail:
 static int replace_str_data_in_filename(char **s, const char *filename, char placeholder, const char *datastring)
 {
     const char *p;
-    char *new_filename;
     char c;
     int addchar_count;
     int found_count = 0;
     AVBPrint buf;
+    int ret;
 
     av_bprint_init(&buf, 0, AV_BPRINT_SIZE_UNLIMITED);
 
@@ -396,22 +395,21 @@ static int replace_str_data_in_filename(char **s, const char *filename, char pla
     }
     if (!av_bprint_is_complete(&buf)) {
         av_bprint_finalize(&buf, NULL);
-        return -1;
+        return AVERROR(ENOMEM);
     }
-    if (av_bprint_finalize(&buf, &new_filename) < 0 || !new_filename)
-        return -1;
-    *s = new_filename;
+    if ((ret = av_bprint_finalize(&buf, s)) < 0)
+        return ret;
     return found_count;
 }
 
 static int replace_int_data_in_filename(char **s, const char *filename, char placeholder, int64_t number)
 {
     const char *p;
-    char *new_filename;
     char c;
     int nd, addchar_count;
     int found_count = 0;
     AVBPrint buf;
+    int ret;
 
     av_bprint_init(&buf, 0, AV_BPRINT_SIZE_UNLIMITED);
 
@@ -445,11 +443,10 @@ static int replace_int_data_in_filename(char **s, const char *filename, char pla
     }
     if (!av_bprint_is_complete(&buf)) {
         av_bprint_finalize(&buf, NULL);
-        return -1;
+        return AVERROR(ENOMEM);
     }
-    if (av_bprint_finalize(&buf, &new_filename) < 0 || !new_filename)
-        return -1;
-    *s = new_filename;
+    if ((ret = av_bprint_finalize(&buf, s)) < 0)
+        return ret;
     return found_count;
 }
 
@@ -1291,8 +1288,8 @@ static int create_master_playlist(AVFormatContext *s,
     int ret, bandwidth;
     const char *m3u8_rel_name = NULL;
     const char *vtt_m3u8_rel_name = NULL;
-    char *ccgroup;
-    char *sgroup = NULL;
+    const char *ccgroup;
+    const char *sgroup = NULL;
     ClosedCaptionsStream *ccs;
     const char *proto = avio_find_protocol_name(hls->master_m3u8_url);
     int is_file_proto = proto && !strcmp(proto, "file");
@@ -1525,7 +1522,7 @@ static int hls_window(AVFormatContext *s, int last, VariantStream *vs)
 
         ret = ff_hls_write_file_entry(byterange_mode ? hls->m3u8_out : vs->out, en->discont, byterange_mode,
                                       en->duration, hls->flags & HLS_ROUND_DURATIONS,
-                                      en->size, en->pos, vs->baseurl,
+                                      en->size, en->pos, hls->baseurl,
                                       en->filename, prog_date_time_p, en->keyframe_size, en->keyframe_pos, hls->flags & HLS_I_FRAMES_ONLY);
         if (ret < 0) {
             av_log(s, AV_LOG_WARNING, "ff_hls_write_file_entry get error\n");
@@ -1547,7 +1544,7 @@ static int hls_window(AVFormatContext *s, int last, VariantStream *vs)
         for (en = vs->segments; en; en = en->next) {
             ret = ff_hls_write_file_entry(hls->sub_m3u8_out, 0, byterange_mode,
                                           en->duration, 0, en->size, en->pos,
-                                          vs->baseurl, en->sub_filename, NULL, 0, 0, 0);
+                                          hls->baseurl, en->sub_filename, NULL, 0, 0, 0);
             if (ret < 0) {
                 av_log(s, AV_LOG_WARNING, "ff_hls_write_file_entry get error\n");
             }
@@ -1944,10 +1941,13 @@ static int parse_variant_stream_mapstring(AVFormatContext *s)
             return AVERROR(EINVAL);
 
         q = varstr;
-        while (q < varstr + strlen(varstr)) {
+        while (1) {
             if (!av_strncasecmp(q, "a:", 2) || !av_strncasecmp(q, "v:", 2) ||
                 !av_strncasecmp(q, "s:", 2))
                 vs->nb_streams++;
+            q = strchr(q, ',');
+            if (!q)
+                break;
             q++;
         }
         vs->streams = av_mallocz(sizeof(AVStream *) * vs->nb_streams);
@@ -1960,10 +1960,7 @@ static int parse_variant_stream_mapstring(AVFormatContext *s)
             char *end;
             varstr = NULL;
             if (av_strstart(keyval, "language:", &val)) {
-                av_free(vs->language);
-                vs->language = av_strdup(val);
-                if (!vs->language)
-                    return AVERROR(ENOMEM);
+                vs->language = val;
                 continue;
             } else if (av_strstart(keyval, "default:", &val)) {
                 vs->is_default = (!av_strncasecmp(val, "YES", strlen("YES")) ||
@@ -1971,28 +1968,16 @@ static int parse_variant_stream_mapstring(AVFormatContext *s)
                 hls->has_default_key = 1;
                 continue;
             } else if (av_strstart(keyval, "name:", &val)) {
-                av_free(vs->varname);
-                vs->varname = av_strdup(val);
-                if (!vs->varname)
-                    return AVERROR(ENOMEM);
+                vs->varname  = val;
                 continue;
             } else if (av_strstart(keyval, "agroup:", &val)) {
-                av_free(vs->agroup);
-                vs->agroup = av_strdup(val);
-                if (!vs->agroup)
-                    return AVERROR(ENOMEM);
+                vs->agroup   = val;
                 continue;
             } else if (av_strstart(keyval, "sgroup:", &val)) {
-                av_free(vs->sgroup);
-                vs->sgroup = av_strdup(val);
-                if (!vs->sgroup)
-                    return AVERROR(ENOMEM);
+                vs->sgroup   = val;
                 continue;
             } else if (av_strstart(keyval, "ccgroup:", &val)) {
-                av_free(vs->ccgroup);
-                vs->ccgroup = av_strdup(val);
-                if (!vs->ccgroup)
-                    return AVERROR(ENOMEM);
+                vs->ccgroup  = val;
                 continue;
             } else if (av_strstart(keyval, "v:", &val)) {
                 codec_type = AVMEDIA_TYPE_VIDEO;
@@ -2006,7 +1991,7 @@ static int parse_variant_stream_mapstring(AVFormatContext *s)
                 return AVERROR(EINVAL);
             }
 
-            num = strtoll(val, &end, 0);
+            num = strtoll(val, &end, 10);
             if (!av_isdigit(*val) || *end != '\0') {
                 av_log(s, AV_LOG_ERROR, "Invalid stream number: '%s'\n", val);
                 return AVERROR(EINVAL);
@@ -2083,20 +2068,11 @@ static int parse_cc_stream_mapstring(AVFormatContext *s)
             ccstr = NULL;
 
             if (av_strstart(keyval, "ccgroup:", &val)) {
-                av_free(ccs->ccgroup);
-                ccs->ccgroup = av_strdup(val);
-                if (!ccs->ccgroup)
-                    return AVERROR(ENOMEM);
+                ccs->ccgroup    = val;
             } else if (av_strstart(keyval, "instreamid:", &val)) {
-                av_free(ccs->instreamid);
-                ccs->instreamid = av_strdup(val);
-                if (!ccs->instreamid)
-                    return AVERROR(ENOMEM);
+                ccs->instreamid = val;
             } else if (av_strstart(keyval, "language:", &val)) {
-                av_free(ccs->language);
-                ccs->language = av_strdup(val);
-                if (!ccs->language)
-                    return AVERROR(ENOMEM);
+                ccs->language   = val;
             } else {
                 av_log(s, AV_LOG_ERROR, "Invalid keyval %s\n", keyval);
                 return AVERROR(EINVAL);
@@ -2159,11 +2135,8 @@ static int update_variant_stream_info(AVFormatContext *s)
             return AVERROR(ENOMEM);
 
         //by default, the first available ccgroup is mapped to the variant stream
-        if (hls->nb_ccstreams) {
-            hls->var_streams[0].ccgroup = av_strdup(hls->cc_streams[0].ccgroup);
-            if (!hls->var_streams[0].ccgroup)
-                return AVERROR(ENOMEM);
-        }
+        if (hls->nb_ccstreams)
+            hls->var_streams[0].ccgroup = hls->cc_streams[0].ccgroup;
 
         for (i = 0; i < s->nb_streams; i++)
             hls->var_streams[0].streams[i] = s->streams[i];
@@ -2344,7 +2317,7 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt)
         vs->start_pts_from_audio = 0;
     }
 
-   if (vs->has_video) {
+    if (vs->has_video) {
         can_split = st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
                     ((pkt->flags & AV_PKT_FLAG_KEY) || (hls->flags & HLS_SPLIT_BY_TIME));
         is_ref_pkt = (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) && (pkt->stream_index == vs->reference_stream_index);
@@ -2417,7 +2390,7 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt)
                                       && (hls->flags & HLS_TEMP_FILE);
             }
 
-            if ((hls->max_seg_size > 0 && (vs->size >= hls->max_seg_size)) || !byterange_mode) {
+            if ((hls->max_seg_size > 0 && (vs->size + vs->start_pos >= hls->max_seg_size)) || !byterange_mode) {
                 AVDictionary *options = NULL;
                 char *filename = NULL;
                 if (hls->key_info_file || hls->encrypt) {
@@ -2512,14 +2485,15 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt)
         if (hls->flags & HLS_SINGLE_FILE) {
             vs->start_pos += vs->size;
         } else if (hls->max_seg_size > 0) {
-            vs->start_pos = new_start_pos;
-            if (vs->size >= hls->max_seg_size) {
+            if (vs->size + vs->start_pos >= hls->max_seg_size) {
                 vs->sequence++;
                 sls_flag_file_rename(hls, vs, old_filename);
                 ret = hls_start(s, vs);
                 vs->start_pos = 0;
                 /* When split segment by byte, the duration is short than hls_time,
                  * so it is not enough one segment duration as hls_time, */
+            } else {
+                vs->start_pos = new_start_pos;
             }
         } else {
             vs->start_pos = new_start_pos;
@@ -2574,20 +2548,6 @@ static void hls_deinit(AVFormatContext *s)
         hls_free_segments(vs->old_segments);
         av_freep(&vs->m3u8_name);
         av_freep(&vs->streams);
-        av_freep(&vs->agroup);
-        av_freep(&vs->sgroup);
-        av_freep(&vs->language);
-        av_freep(&vs->ccgroup);
-        av_freep(&vs->baseurl);
-        av_freep(&vs->varname);
-    }
-
-    for (i = 0; i < hls->nb_ccstreams; i++) {
-        ClosedCaptionsStream *ccs = &hls->cc_streams[i];
-
-        av_freep(&ccs->ccgroup);
-        av_freep(&ccs->instreamid);
-        av_freep(&ccs->language);
     }
 
     ff_format_io_close(s, &hls->m3u8_out);
@@ -2670,7 +2630,6 @@ static int hls_write_trailer(struct AVFormatContext *s)
             goto failed;
 
         vs->size = range_length;
-        hlsenc_io_close(s, &vs->out, filename);
         ret = hlsenc_io_close(s, &vs->out, filename);
         if (ret < 0) {
             av_log(s, AV_LOG_WARNING, "upload segment failed, will retry with a new http session.\n");
@@ -2745,6 +2704,7 @@ static int hls_init(AVFormatContext *s)
     char *p = NULL;
     int http_base_proto = ff_is_http_proto(s->url);
     int fmp4_init_filename_len = strlen(hls->fmp4_init_filename) + 1;
+    double initial_program_date_time = av_gettime() / 1000000.0;
 
     if (hls->use_localtime) {
         pattern = get_default_pattern_localtime_fmt(s);
@@ -2839,12 +2799,7 @@ static int hls_init(AVFormatContext *s)
         vs->start_pts = AV_NOPTS_VALUE;
         vs->end_pts   = AV_NOPTS_VALUE;
         vs->current_segment_final_filename_fmt[0] = '\0';
-
-        if (hls->flags & HLS_PROGRAM_DATE_TIME) {
-            time_t now0;
-            time(&now0);
-            vs->initial_prog_date_time = now0;
-        }
+        vs->initial_prog_date_time = initial_program_date_time;
 
         for (j = 0; j < vs->nb_streams; j++) {
             vs->has_video += vs->streams[j]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
@@ -2951,12 +2906,6 @@ static int hls_init(AVFormatContext *s)
             }
             if (p)
                 *p = '.';
-        }
-
-        if (hls->baseurl) {
-            vs->baseurl = av_strdup(hls->baseurl);
-            if (!vs->baseurl)
-                return AVERROR(ENOMEM);
         }
 
         if ((ret = hls_mux_init(s, vs)) < 0)

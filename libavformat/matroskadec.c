@@ -259,6 +259,7 @@ typedef struct MatroskaTrack {
 typedef struct MatroskaAttachment {
     uint64_t uid;
     char *filename;
+    char *description;
     char *mime;
     EbmlBin bin;
 
@@ -587,7 +588,7 @@ static EbmlSyntax matroska_attachment[] = {
     { MATROSKA_ID_FILENAME,     EBML_UTF8, 0, offsetof(MatroskaAttachment, filename) },
     { MATROSKA_ID_FILEMIMETYPE, EBML_STR,  0, offsetof(MatroskaAttachment, mime) },
     { MATROSKA_ID_FILEDATA,     EBML_BIN,  0, offsetof(MatroskaAttachment, bin) },
-    { MATROSKA_ID_FILEDESC,     EBML_NONE },
+    { MATROSKA_ID_FILEDESC,     EBML_UTF8, 0, offsetof(MatroskaAttachment, description) },
     CHILD_OF(matroska_attachments)
 };
 
@@ -1771,7 +1772,7 @@ static void matroska_convert_tags(AVFormatContext *s)
                 }
             }
             if (!found) {
-                av_log(NULL, AV_LOG_WARNING,
+                av_log(s, AV_LOG_WARNING,
                        "The tags at index %d refer to a "
                        "non-existent attachment %"PRId64".\n",
                        i, tags[i].target.attachuid);
@@ -1788,7 +1789,7 @@ static void matroska_convert_tags(AVFormatContext *s)
                 }
             }
             if (!found) {
-                av_log(NULL, AV_LOG_WARNING,
+                av_log(s, AV_LOG_WARNING,
                        "The tags at index %d refer to a non-existent chapter "
                        "%"PRId64".\n",
                        i, tags[i].target.chapteruid);
@@ -1805,7 +1806,7 @@ static void matroska_convert_tags(AVFormatContext *s)
                }
             }
             if (!found) {
-                av_log(NULL, AV_LOG_WARNING,
+                av_log(s, AV_LOG_WARNING,
                        "The tags at index %d refer to a non-existent track "
                        "%"PRId64".\n",
                        i, tags[i].target.trackuid);
@@ -2026,12 +2027,12 @@ static int matroska_parse_flac(AVFormatContext *s,
 
 static int mkv_field_order(MatroskaDemuxContext *matroska, int64_t field_order)
 {
-    int major, minor, micro, bttb = 0;
+    int minor, micro, bttb = 0;
 
     /* workaround a bug in our Matroska muxer, introduced in version 57.36 alongside
      * this function, and fixed in 57.52 */
-    if (matroska->muxingapp && sscanf(matroska->muxingapp, "Lavf%d.%d.%d", &major, &minor, &micro) == 3)
-        bttb = (major == 57 && minor >= 36 && minor <= 51 && micro >= 100);
+    if (matroska->muxingapp && sscanf(matroska->muxingapp, "Lavf57.%d.%d", &minor, &micro) == 2)
+        bttb = (minor >= 36 && minor <= 51 && micro >= 100);
 
     switch (field_order) {
     case MATROSKA_VIDEO_FIELDORDER_PROGRESSIVE:
@@ -2157,42 +2158,40 @@ static int mkv_parse_video_color(AVStream *st, const MatroskaTrack *track) {
     return 0;
 }
 
-static int mkv_parse_video_projection(AVStream *st, const MatroskaTrack *track) {
+static int mkv_parse_video_projection(AVStream *st, const MatroskaTrack *track,
+                                      void *logctx)
+{
     AVSphericalMapping *spherical;
+    const MatroskaTrackVideoProjection *mkv_projection = &track->video.projection;
+    const uint8_t *priv_data = mkv_projection->private.data;
     enum AVSphericalProjection projection;
     size_t spherical_size;
     uint32_t l = 0, t = 0, r = 0, b = 0;
     uint32_t padding = 0;
     int ret;
-    GetByteContext gb;
 
-    bytestream2_init(&gb, track->video.projection.private.data,
-                     track->video.projection.private.size);
-
-    if (bytestream2_get_byte(&gb) != 0) {
-        av_log(NULL, AV_LOG_WARNING, "Unknown spherical metadata\n");
+    if (mkv_projection->private.size && priv_data[0] != 0) {
+        av_log(logctx, AV_LOG_WARNING, "Unknown spherical metadata\n");
         return 0;
     }
-
-    bytestream2_skip(&gb, 3); // flags
 
     switch (track->video.projection.type) {
     case MATROSKA_VIDEO_PROJECTION_TYPE_EQUIRECTANGULAR:
         if (track->video.projection.private.size == 20) {
-            t = bytestream2_get_be32(&gb);
-            b = bytestream2_get_be32(&gb);
-            l = bytestream2_get_be32(&gb);
-            r = bytestream2_get_be32(&gb);
+            t = AV_RB32(priv_data +  4);
+            b = AV_RB32(priv_data +  8);
+            l = AV_RB32(priv_data + 12);
+            r = AV_RB32(priv_data + 16);
 
             if (b >= UINT_MAX - t || r >= UINT_MAX - l) {
-                av_log(NULL, AV_LOG_ERROR,
+                av_log(logctx, AV_LOG_ERROR,
                        "Invalid bounding rectangle coordinates "
                        "%"PRIu32",%"PRIu32",%"PRIu32",%"PRIu32"\n",
                        l, t, r, b);
                 return AVERROR_INVALIDDATA;
             }
         } else if (track->video.projection.private.size != 0) {
-            av_log(NULL, AV_LOG_ERROR, "Unknown spherical metadata\n");
+            av_log(logctx, AV_LOG_ERROR, "Unknown spherical metadata\n");
             return AVERROR_INVALIDDATA;
         }
 
@@ -2203,19 +2202,19 @@ static int mkv_parse_video_projection(AVStream *st, const MatroskaTrack *track) 
         break;
     case MATROSKA_VIDEO_PROJECTION_TYPE_CUBEMAP:
         if (track->video.projection.private.size < 4) {
-            av_log(NULL, AV_LOG_ERROR, "Missing projection private properties\n");
+            av_log(logctx, AV_LOG_ERROR, "Missing projection private properties\n");
             return AVERROR_INVALIDDATA;
         } else if (track->video.projection.private.size == 12) {
-            uint32_t layout = bytestream2_get_be32(&gb);
+            uint32_t layout = AV_RB32(priv_data + 4);
             if (layout) {
-                av_log(NULL, AV_LOG_WARNING,
+                av_log(logctx, AV_LOG_WARNING,
                        "Unknown spherical cubemap layout %"PRIu32"\n", layout);
                 return 0;
             }
             projection = AV_SPHERICAL_CUBEMAP;
-            padding = bytestream2_get_be32(&gb);
+            padding = AV_RB32(priv_data + 8);
         } else {
-            av_log(NULL, AV_LOG_ERROR, "Unknown spherical metadata\n");
+            av_log(logctx, AV_LOG_ERROR, "Unknown spherical metadata\n");
             return AVERROR_INVALIDDATA;
         }
         break;
@@ -2223,7 +2222,7 @@ static int mkv_parse_video_projection(AVStream *st, const MatroskaTrack *track) 
         /* No Spherical metadata */
         return 0;
     default:
-        av_log(NULL, AV_LOG_WARNING,
+        av_log(logctx, AV_LOG_WARNING,
                "Unknown spherical metadata type %"PRIu64"\n",
                track->video.projection.type);
         return 0;
@@ -2779,7 +2778,7 @@ static int matroska_parse_tracks(AVFormatContext *s)
             ret = mkv_parse_video_color(st, track);
             if (ret < 0)
                 return ret;
-            ret = mkv_parse_video_projection(st, track);
+            ret = mkv_parse_video_projection(st, track, matroska->ctx);
             if (ret < 0)
                 return ret;
         } else if (track->type == MATROSKA_TRACK_TYPE_AUDIO) {
@@ -2914,6 +2913,8 @@ static int matroska_read_header(AVFormatContext *s)
                 break;
             av_dict_set(&st->metadata, "filename", attachments[j].filename, 0);
             av_dict_set(&st->metadata, "mimetype", attachments[j].mime, 0);
+            if (attachments[j].description)
+                av_dict_set(&st->metadata, "title", attachments[j].description, 0);
             st->codecpar->codec_id   = AV_CODEC_ID_NONE;
 
             for (i = 0; mkv_image_mime_tags[i].id != AV_CODEC_ID_NONE; i++) {
@@ -2933,9 +2934,8 @@ static int matroska_read_header(AVFormatContext *s)
                 st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
 
                 av_init_packet(pkt);
-                pkt->buf = av_buffer_ref(attachments[j].bin.buf);
-                if (!pkt->buf)
-                    return AVERROR(ENOMEM);
+                pkt->buf          = attachments[j].bin.buf;
+                attachments[j].bin.buf = NULL;
                 pkt->data         = attachments[j].bin.data;
                 pkt->size         = attachments[j].bin.size;
                 pkt->stream_index = st->index;
@@ -3032,9 +3032,9 @@ static int matroska_parse_laces(MatroskaDemuxContext *matroska, uint8_t **buf,
     if (size <= 0)
         return AVERROR_INVALIDDATA;
 
-    *laces    = *data + 1;
-    data     += 1;
-    size     -= 1;
+    *laces = *data + 1;
+    data  += 1;
+    size  -= 1;
 
     switch (type) {
     case 0x1: /* Xiph lacing */
@@ -3044,31 +3044,26 @@ static int matroska_parse_laces(MatroskaDemuxContext *matroska, uint8_t **buf,
         for (n = 0; n < *laces - 1; n++) {
             lace_size[n] = 0;
 
-            while (1) {
-                if (size <= total) {
+            do {
+                if (size <= total)
                     return AVERROR_INVALIDDATA;
-                }
                 temp          = *data;
                 total        += temp;
                 lace_size[n] += temp;
                 data         += 1;
                 size         -= 1;
-                if (temp != 0xff)
-                    break;
-            }
+            } while (temp ==  0xff);
         }
-        if (size < total) {
+        if (size < total)
             return AVERROR_INVALIDDATA;
-        }
 
         lace_size[n] = size - total;
         break;
     }
 
     case 0x2: /* fixed-size lacing */
-        if (size % (*laces)) {
+        if (size % (*laces))
             return AVERROR_INVALIDDATA;
-        }
         for (n = 0; n < *laces; n++)
             lace_size[n] = size / *laces;
         break;
@@ -3104,15 +3099,15 @@ static int matroska_parse_laces(MatroskaDemuxContext *matroska, uint8_t **buf,
         }
         data += offset;
         size -= offset;
-        if (size < total) {
+        if (size < total)
             return AVERROR_INVALIDDATA;
-        }
+
         lace_size[*laces - 1] = size - total;
         break;
     }
     }
 
-    *buf      = data;
+    *buf = data;
 
     return 0;
 }
@@ -3569,7 +3564,8 @@ static int matroska_parse_block(MatroskaDemuxContext *matroska, AVBufferRef *buf
 
     if (st->discard >= AVDISCARD_ALL)
         return res;
-    av_assert1(block_duration != AV_NOPTS_VALUE);
+    if (block_duration > INT64_MAX)
+        block_duration = INT64_MAX;
 
     block_time = sign_extend(AV_RB16(data), 16);
     data      += 2;
@@ -4180,15 +4176,18 @@ static int webm_dash_manifest_read_header(AVFormatContext *s)
         av_log(s, AV_LOG_ERROR, "Failed to read file headers\n");
         return -1;
     }
-    if (!s->nb_streams) {
-        matroska_read_close(s);
-        av_log(s, AV_LOG_ERROR, "No streams found\n");
-        return AVERROR_INVALIDDATA;
+    if (!matroska->tracks.nb_elem || !s->nb_streams) {
+        av_log(s, AV_LOG_ERROR, "No track found\n");
+        ret = AVERROR_INVALIDDATA;
+        goto fail;
     }
 
     if (!matroska->is_live) {
         buf = av_asprintf("%g", matroska->duration);
-        if (!buf) return AVERROR(ENOMEM);
+        if (!buf) {
+            ret = AVERROR(ENOMEM);
+            goto fail;
+        }
         av_dict_set(&s->streams[0]->metadata, DURATION,
                     buf, AV_DICT_DONT_STRDUP_VAL);
 
@@ -4211,7 +4210,7 @@ static int webm_dash_manifest_read_header(AVFormatContext *s)
         ret = webm_dash_manifest_cues(s, init_range);
         if (ret < 0) {
             av_log(s, AV_LOG_ERROR, "Error parsing Cues\n");
-            return ret;
+            goto fail;
         }
     }
 
@@ -4221,6 +4220,9 @@ static int webm_dash_manifest_read_header(AVFormatContext *s)
                         matroska->bandwidth, 0);
     }
     return 0;
+fail:
+    matroska_read_close(s);
+    return ret;
 }
 
 static int webm_dash_manifest_read_packet(AVFormatContext *s, AVPacket *pkt)

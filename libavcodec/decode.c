@@ -66,7 +66,7 @@ typedef struct FramePool {
 
 static int apply_param_change(AVCodecContext *avctx, const AVPacket *avpkt)
 {
-    int size = 0, ret;
+    int size, ret;
     const uint8_t *data;
     uint32_t flags;
     int64_t val;
@@ -231,7 +231,7 @@ int ff_decode_bsfs_init(AVCodecContext *avctx)
 
     return 0;
 fail:
-    ff_decode_bsfs_uninit(avctx);
+    av_bsf_free(&avci->bsf);
     return ret;
 }
 
@@ -1471,12 +1471,12 @@ static int update_frame_pool(AVCodecContext *avctx, AVFrame *frame)
 
     switch (avctx->codec_type) {
     case AVMEDIA_TYPE_VIDEO: {
-        uint8_t *data[4];
         int linesize[4];
-        int size[4] = { 0 };
         int w = frame->width;
         int h = frame->height;
-        int tmpsize, unaligned;
+        int unaligned;
+        ptrdiff_t linesize1[4];
+        size_t size[4];
 
         avcodec_align_dimensions2(avctx, &w, &h, pool->stride_align);
 
@@ -1494,20 +1494,19 @@ static int update_frame_pool(AVCodecContext *avctx, AVFrame *frame)
                 unaligned |= linesize[i] % pool->stride_align[i];
         } while (unaligned);
 
-        tmpsize = av_image_fill_pointers(data, avctx->pix_fmt, h,
-                                         NULL, linesize);
-        if (tmpsize < 0) {
-            ret = tmpsize;
+        for (i = 0; i < 4; i++)
+            linesize1[i] = linesize[i];
+        ret = av_image_fill_plane_sizes(size, avctx->pix_fmt, h, linesize1);
+        if (ret < 0)
             goto fail;
-        }
-
-        for (i = 0; i < 3 && data[i + 1]; i++)
-            size[i] = data[i + 1] - data[i];
-        size[i] = tmpsize - (data[i] - data[0]);
 
         for (i = 0; i < 4; i++) {
             pool->linesize[i] = linesize[i];
             if (size[i]) {
+                if (size[i] > INT_MAX - (16 + STRIDE_ALIGN - 1)) {
+                    ret = AVERROR(EINVAL);
+                    goto fail;
+                }
                 pool->pools[i] = av_buffer_pool_init(size[i] + 16 + STRIDE_ALIGN - 1,
                                                      CONFIG_MEMORY_POISONING ?
                                                         NULL :
@@ -1699,6 +1698,7 @@ int ff_decode_frame_props(AVCodecContext *avctx, AVFrame *frame)
         { AV_PKT_DATA_CONTENT_LIGHT_LEVEL,        AV_FRAME_DATA_CONTENT_LIGHT_LEVEL },
         { AV_PKT_DATA_A53_CC,                     AV_FRAME_DATA_A53_CC },
         { AV_PKT_DATA_ICC_PROFILE,                AV_FRAME_DATA_ICC_PROFILE },
+        { AV_PKT_DATA_S12M_TIMECODE,              AV_FRAME_DATA_S12M_TIMECODE },
     };
 
     if (pkt) {
@@ -1886,35 +1886,37 @@ int ff_get_buffer(AVCodecContext *avctx, AVFrame *frame, int flags)
     if (ret < 0)
         goto fail;
 
-    if (hwaccel && hwaccel->alloc_frame) {
-        ret = hwaccel->alloc_frame(avctx, frame);
-        if (ret < 0)
-            goto fail;
-    } else {
-        if (!hwaccel)
-            avctx->sw_pix_fmt = avctx->pix_fmt;
+    if (hwaccel) {
+        if (hwaccel->alloc_frame) {
+            ret = hwaccel->alloc_frame(avctx, frame);
+            goto end;
+        }
+    } else
+        avctx->sw_pix_fmt = avctx->pix_fmt;
 
-        ret = avctx->get_buffer2(avctx, frame, flags);
-        if (ret < 0)
-            goto fail;
+    ret = avctx->get_buffer2(avctx, frame, flags);
+    if (ret < 0)
+        goto fail;
 
-        validate_avframe_allocation(avctx, frame);
+    validate_avframe_allocation(avctx, frame);
 
-        ret = ff_attach_decode_data(frame);
-        if (ret < 0)
-            goto fail;
-    }
+    ret = ff_attach_decode_data(frame);
+    if (ret < 0)
+        goto fail;
 
+end:
     if (avctx->codec_type == AVMEDIA_TYPE_VIDEO && !override_dimensions &&
         !(avctx->codec->caps_internal & FF_CODEC_CAP_EXPORTS_CROPPING)) {
         frame->width  = avctx->width;
         frame->height = avctx->height;
     }
 
-    return 0;
 fail:
-    av_log(avctx, AV_LOG_ERROR, "get_buffer() failed\n");
-    av_frame_unref(frame);
+    if (ret < 0) {
+        av_log(avctx, AV_LOG_ERROR, "get_buffer() failed\n");
+        av_frame_unref(frame);
+    }
+
     return ret;
 }
 
@@ -1961,53 +1963,4 @@ int ff_reget_buffer(AVCodecContext *avctx, AVFrame *frame, int flags)
     if (ret < 0)
         av_log(avctx, AV_LOG_ERROR, "reget_buffer() failed\n");
     return ret;
-}
-
-void avcodec_flush_buffers(AVCodecContext *avctx)
-{
-    AVCodecInternal *avci = avctx->internal;
-
-    if (av_codec_is_encoder(avctx->codec)) {
-        int caps = avctx->codec->capabilities;
-
-        if (!(caps & AV_CODEC_CAP_ENCODER_FLUSH)) {
-            // Only encoders that explicitly declare support for it can be
-            // flushed. Otherwise, this is a no-op.
-            av_log(avctx, AV_LOG_WARNING, "Ignoring attempt to flush encoder "
-                   "that doesn't support it\n");
-            return;
-        }
-
-        // We haven't implemented flushing for frame-threaded encoders.
-        av_assert0(!(caps & AV_CODEC_CAP_FRAME_THREADS));
-    }
-
-    avci->draining      = 0;
-    avci->draining_done = 0;
-    avci->nb_draining_errors = 0;
-    av_frame_unref(avci->buffer_frame);
-    av_frame_unref(avci->compat_decode_frame);
-    av_packet_unref(avci->buffer_pkt);
-    avci->buffer_pkt_valid = 0;
-
-    av_packet_unref(avci->ds.in_pkt);
-
-    if (HAVE_THREADS && avctx->active_thread_type & FF_THREAD_FRAME)
-        ff_thread_flush(avctx);
-    else if (avctx->codec->flush)
-        avctx->codec->flush(avctx);
-
-    avctx->pts_correction_last_pts =
-    avctx->pts_correction_last_dts = INT64_MIN;
-
-    if (av_codec_is_decoder(avctx->codec))
-        av_bsf_flush(avci->bsf);
-
-    if (!avctx->refcounted_frames)
-        av_frame_unref(avci->to_free);
-}
-
-void ff_decode_bsfs_uninit(AVCodecContext *avctx)
-{
-    av_bsf_free(&avctx->internal->bsf);
 }
